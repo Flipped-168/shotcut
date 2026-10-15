@@ -1233,12 +1233,6 @@ int MultitrackModel::trimClipOut(
         if (!track)
             continue;
 
-        Mlt::Playlist playlist(*track);
-        QScopedPointer<Mlt::ClipInfo> info(playlist.clip_info(clipIndex));
-        // These are used to adjust filters but must be retrieved before changing clip length.
-        int filterIn = MLT.filterIn(playlist, clipIndex);
-        int filterOut = MLT.filterOut(playlist, clipIndex);
-
         //when not rippling, never touch the other tracks
         if (trackIndex != i && (!ripple || !rippleAllTracks))
             continue;
@@ -1252,6 +1246,24 @@ int MultitrackModel::trimClipOut(
                 continue;
             }
         }
+
+        Mlt::Playlist playlist(*track);
+        if (!playlist.is_valid()) {
+            LOG_DEBUG() << "Invalid Playlist" << trackIndex;
+            continue;
+        }
+        if (clipIndex >= playlist.count()) {
+            LOG_DEBUG() << "Invalid Clip Index" << clipIndex;
+            continue;
+        }
+        QScopedPointer<Mlt::ClipInfo> info(playlist.clip_info(clipIndex));
+        if (!info) {
+            LOG_DEBUG() << "Invalid clip info";
+            continue;
+        }
+        // These are used to adjust filters but must be retrieved before changing clip length.
+        int filterIn = MLT.filterIn(playlist, clipIndex);
+        int filterOut = MLT.filterOut(playlist, clipIndex);
 
         Q_ASSERT(otherTracksPosition == -1);
         otherTracksPosition = info->start + info->frame_count;
@@ -2378,6 +2390,9 @@ bool MultitrackModel::transitionOverlapValid(
     if (track) {
         Mlt::Playlist playlist(*track);
         if (fromTrack == toTrack) {
+            // A drag that resizes the mix after this clip is not a new overlap.
+            if (!ripple && resizeTransitionInByMoveValid(toTrack, clipIndex, position))
+                return false;
             int targetIndex = playlist.get_clip_index_at(position);
             int previousIndex = clipIndex - 1 - (playlist.is_blank(clipIndex - 1) ? 1 : 0);
             int nextIndex = clipIndex + 1 + (playlist.is_blank(clipIndex + 1) ? 1 : 0);
@@ -2694,6 +2709,38 @@ bool MultitrackModel::trimTransitionInValid(int trackIndex, int clipIndex, int d
         }
     }
     return result;
+}
+
+bool MultitrackModel::resizeTransitionInByMoveValid(int trackIndex, int clipIndex, int position)
+{
+    if (trackIndex < 0 || trackIndex >= m_trackList.size() || clipIndex < 0)
+        return false;
+    int i = m_trackList.at(trackIndex).mlt_index;
+    QScopedPointer<Mlt::Producer> track(m_tractor->track(i));
+    if (!track || !track->is_valid())
+        return false;
+    Mlt::Playlist playlist(*track);
+    if (!playlist.is_valid() || clipIndex >= playlist.count())
+        return false;
+    QScopedPointer<Mlt::ClipInfo> info(playlist.clip_info(clipIndex));
+    if (!info)
+        return false;
+
+    const int delta = position - info->start;
+    if (!trimTransitionInValid(trackIndex, clipIndex, -delta))
+        return false;
+
+    // Dragging right keeps the new start on this clip. The dock rejects a right
+    // drag whose tail lands on the mix, so this is rarely reached.
+    if (delta >= 0)
+        return playlist.get_clip_index_at(position) >= clipIndex;
+
+    // Dragging left grows the mix and shortens the previous entry. That entry
+    // must survive; snapping onto its start consumes it and is a move.
+    // trimTransitionInValid already requires this clip to keep a legal out point.
+    if (clipIndex < 1 || isTransition(playlist, clipIndex - 1))
+        return false;
+    return playlist.clip_length(clipIndex - 1) > -delta;
 }
 
 void MultitrackModel::trimTransitionIn(int trackIndex, int clipIndex, int delta, bool slip)
